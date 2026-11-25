@@ -89,7 +89,6 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          root="$PWD"
           cd "openssl-${OSSL_VERSION}"
 
           echo "=== ldd dist/bin/openssl.exe ==="
@@ -106,38 +105,62 @@ jobs:
             cp "$dll" artifact/
           done
 
-          # Проверяем ровно то, что скачает пользователь: чистый каталог без
-          # build-дерева (иначе legacy.dll из dist/lib/ossl-modules маскирует
-          # проблему — именно так сборка была зелёной, а exe нерабочим).
-          verify="$(mktemp -d)"
-          cp artifact/* "$verify"/
-          cd "$verify"
-          unset OPENSSL_MODULES || true
+          # staging-каталог вне build-дерева: проверяем ровно то, что скачает
+          # пользователь (иначе ossl-modules из dist/ маскирует проблему)
+          rm -rf ../verify
+          mkdir -p ../verify
+          cp artifact/* ../verify/
 
-          echo "=== smoke test in clean dir: $verify ==="
+          echo "=== artifact contents ==="
+          ls -la artifact
+
+      - name: Verify: binary runs from a clean dir
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd verify
+
+          if ! ./openssl.exe version -a > version.txt 2>&1; then
+            echo "::error::openssl.exe не запускается в чистом каталоге (нет DLL рядом?)"
+            cat version.txt || true
+            ldd ./openssl.exe || true
+            exit 1
+          fi
+          cat version.txt
+
           {
-            echo "# openssl built for windows x64, clean-dir verification"
+            echo "# openssl ${OSSL_VERSION} win64 static — проверка в чистом каталоге"
             echo
-            ./openssl.exe version -a
+            cat version.txt
             echo
-            echo "## loaded providers"
+            echo "## providers"
             ./openssl.exe list -providers || true
             echo
             echo "## ldd"
             ldd ./openssl.exe || true
-          } | tee "$root/openssl-${OSSL_VERSION}/artifact/build-info.txt"
+          } > ../openssl-${OSSL_VERSION}/artifact/build-info.txt
 
-          echo "=== legacy provider check ==="
-          if ./openssl.exe ciphers -provider default -provider legacy 'ALL:eNULL' | tr ':' '\n' | grep -qx 'DES-CBC3-SHA'; then
+      - name: Verify: legacy provider is built in (RC4/3DES/DES)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd verify
+
+          # без конвейеров: grep -q + pipefail дают ложный сбой из-за SIGPIPE
+          cipherlist="$(./openssl.exe ciphers -provider default -provider legacy 'ALL:eNULL' 2>&1)" || {
+            echo "::error::не удалось получить список шифров с legacy provider"
+            printf '%s\n' "$cipherlist"
+            ./openssl.exe list -providers -provider default -provider legacy || true
+            exit 1
+          }
+
+          if [[ ":$cipherlist:" == *":DES-CBC3-SHA:"* ]]; then
             echo "legacy provider OK: DES-CBC3-SHA доступен (RC4/3DES/DES проверяемы)"
           else
             echo "::error::legacy provider недоступен — собранный exe не умеет RC4/3DES/DES, аудит слабых шифров будет ложным"
             ./openssl.exe list -providers -provider default -provider legacy || true
             exit 1
           fi
-
-          echo "=== artifact contents ==="
-          ls -la "$root/openssl-${OSSL_VERSION}/artifact"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
