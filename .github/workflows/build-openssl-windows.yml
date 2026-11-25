@@ -114,7 +114,7 @@ jobs:
           echo "=== artifact contents ==="
           ls -la artifact
 
-      - name: Verify: binary runs from a clean dir
+      - name: "Verify: binary runs from a clean dir"
         shell: msys2 {0}
         run: |
           set -euo pipefail
@@ -140,7 +140,7 @@ jobs:
             ldd ./openssl.exe || true
           } > ../openssl-${OSSL_VERSION}/artifact/build-info.txt
 
-      - name: Verify: legacy provider is built in (RC4/3DES/DES)
+      - name: "Verify: legacy provider is built in (RC4/3DES/DES)"
         shell: msys2 {0}
         run: |
           set -euo pipefail
