@@ -1,0 +1,113 @@
+name: Build OpenSSL for Windows (static)
+
+# Собирает openssl.exe под Windows x86_64 статически (без DLL от MinGW)
+# и отдаёт готовый портативный набор артефактом.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия OpenSSL без префикса (например 3.5.9 — LTS)"
+        required: true
+        default: "3.5.9"
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-openssl-windows.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-openssl-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OSSL_VERSION: ${{ inputs.version || '3.5.9' }}
+
+jobs:
+  build:
+    name: openssl ${{ inputs.version || '3.5.9' }} / mingw64 static
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download source and verify SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $v = $env:OSSL_VERSION
+          $base = "https://github.com/openssl/openssl/releases/download/openssl-$v"
+
+          Invoke-WebRequest -UseBasicParsing "$base/openssl-$v.tar.gz" -OutFile openssl-src.tar.gz
+          Invoke-WebRequest -UseBasicParsing "$base/openssl-$v.tar.gz.sha256" -OutFile openssl-src.sha256
+
+          # формат файла: "<sha256> *openssl-<ver>.tar.gz"
+          $expected = ((Get-Content openssl-src.sha256 -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash openssl-src.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          Write-Host "expected: $expected"
+          Write-Host "actual:   $actual"
+          if ($expected -ne $actual) { throw "SHA256 mismatch for openssl-$v.tar.gz" }
+
+      - name: Build (MSYS2 / mingw64)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          tar xzf openssl-src.tar.gz
+          cd "openssl-${OSSL_VERSION}"
+
+          # no-shared  -> статические библиотеки, exe без openssl DLL
+          # -static    -> линковать libgcc/libwinpthread внутрь exe
+          # no-tests   -> без тестовых бинарей (сборка быстрее)
+          ./Configure mingw64 no-shared no-tests -static \
+            --prefix="$PWD/dist" \
+            --openssldir="$PWD/dist/ssl"
+
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Assemble portable artifact
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "openssl-${OSSL_VERSION}"
+
+          echo "=== ldd dist/bin/openssl.exe ==="
+          ldd dist/bin/openssl.exe || true
+
+          mkdir -p artifact
+          cp dist/bin/openssl.exe artifact/
+          if [ -f dist/ssl/openssl.cnf ]; then
+            cp dist/ssl/openssl.cnf artifact/
+          fi
+          # страховка: если что-то всё же осталось динамическим — кладём рядом
+          for dll in $(ldd dist/bin/openssl.exe | awk '/=> \/mingw64/ {print $3}'); do
+            echo "bundling $dll"
+            cp "$dll" artifact/
+          done
+
+          echo "=== smoke test ==="
+          ./artifact/openssl.exe version -a
+
+          echo "=== legacy provider check ==="
+          if ./artifact/openssl.exe ciphers -provider default -provider legacy 'ALL:eNULL' | tr ':' '\n' | grep -q '^DES-CBC3-SHA$'; then
+            echo "legacy provider OK: DES-CBC3-SHA доступен (RC4/3DES/DES проверяемы)"
+          else
+            echo "::warning::legacy provider недоступен — аудит слабых шифров (RC4/3DES/DES) будет неполным"
+          fi
+
+          echo "=== artifact contents ==="
+          ls -la artifact
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openssl-${{ env.OSSL_VERSION }}-win64-static
+          path: openssl-${{ env.OSSL_VERSION }}/artifact
+          if-no-files-found: error
+          retention-days: 90

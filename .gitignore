@@ -1,0 +1,8 @@
+# артефакты сборки и отчёты не коммитим
+*.zip
+*.tar.gz
+*.exe
+*.log
+report*.txt
+tls-report*.txt
+openssl-src*
