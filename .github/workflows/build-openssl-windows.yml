@@ -74,9 +74,11 @@ jobs:
           cd "openssl-${OSSL_VERSION}"
 
           # no-shared  -> статические библиотеки, exe без openssl DLL
+          # no-module  -> провайдеры (включая legacy) вкомпилируются в libcrypto,
+          #               а не собираются отдельным legacy.dll
           # -static    -> линковать libgcc/libwinpthread внутрь exe
           # no-tests   -> без тестовых бинарей (сборка быстрее)
-          ./Configure mingw64 no-shared no-tests -static \
+          ./Configure mingw64 no-shared no-module no-tests -static \
             --prefix="$PWD/dist" \
             --openssldir="$PWD/dist/ssl"
 
@@ -87,6 +89,7 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          root="$PWD"
           cd "openssl-${OSSL_VERSION}"
 
           echo "=== ldd dist/bin/openssl.exe ==="
@@ -103,18 +106,38 @@ jobs:
             cp "$dll" artifact/
           done
 
-          echo "=== smoke test ==="
-          ./artifact/openssl.exe version -a
+          # Проверяем ровно то, что скачает пользователь: чистый каталог без
+          # build-дерева (иначе legacy.dll из dist/lib/ossl-modules маскирует
+          # проблему — именно так сборка была зелёной, а exe нерабочим).
+          verify="$(mktemp -d)"
+          cp artifact/* "$verify"/
+          cd "$verify"
+          unset OPENSSL_MODULES || true
+
+          echo "=== smoke test in clean dir: $verify ==="
+          {
+            echo "# openssl built for windows x64, clean-dir verification"
+            echo
+            ./openssl.exe version -a
+            echo
+            echo "## loaded providers"
+            ./openssl.exe list -providers || true
+            echo
+            echo "## ldd"
+            ldd ./openssl.exe || true
+          } | tee "$root/openssl-${OSSL_VERSION}/artifact/build-info.txt"
 
           echo "=== legacy provider check ==="
-          if ./artifact/openssl.exe ciphers -provider default -provider legacy 'ALL:eNULL' | tr ':' '\n' | grep -q '^DES-CBC3-SHA$'; then
+          if ./openssl.exe ciphers -provider default -provider legacy 'ALL:eNULL' | tr ':' '\n' | grep -qx 'DES-CBC3-SHA'; then
             echo "legacy provider OK: DES-CBC3-SHA доступен (RC4/3DES/DES проверяемы)"
           else
-            echo "::warning::legacy provider недоступен — аудит слабых шифров (RC4/3DES/DES) будет неполным"
+            echo "::error::legacy provider недоступен — собранный exe не умеет RC4/3DES/DES, аудит слабых шифров будет ложным"
+            ./openssl.exe list -providers -provider default -provider legacy || true
+            exit 1
           fi
 
           echo "=== artifact contents ==="
-          ls -la artifact
+          ls -la "$root/openssl-${OSSL_VERSION}/artifact"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
