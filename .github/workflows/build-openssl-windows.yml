@@ -54,6 +54,18 @@ jobs:
           Write-Host "actual:   $actual"
           if ($expected -ne $actual) { throw "SHA256 mismatch for openssl-$v.tar.gz" }
 
+      - name: Setup MSYS2 (mingw64 toolchain)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            make
+            perl
+            diffutils
+            gawk
+
       - name: Build (MSYS2 / mingw64)
         shell: msys2 {0}
         run: |
