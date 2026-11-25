@@ -122,15 +122,17 @@ $OpensslPath = (Resolve-Path -LiteralPath $OpensslPath).Path
 $script:ProviderArgs = @()
 $script:LegacyAvailable = $false
 
-$legacyProbe = ''
+# Признак — факт успешной загрузки провайдера, а не наличие конкретного шифра
+# в списке: список зависит от security level и от политики libssl.
+$providerProbe = ''
 try {
-    $legacyListArgs = @('ciphers', '-provider', 'default', '-provider', 'legacy', 'ALL:eNULL:aNULL:@SECLEVEL=0')
-    $legacyProbe = ((& $OpensslPath @legacyListArgs 2>&1) -join '')
+    $providerProbeArgs = @('list', '-providers', '-provider', 'default', '-provider', 'legacy')
+    $providerProbe = ((& $OpensslPath @providerProbeArgs 2>&1) -join "`n")
 } catch {
-    $legacyProbe = ''
+    $providerProbe = ''
 }
 
-if ($legacyProbe -match 'DES-CBC3-SHA|RC4-') {
+if ($providerProbe -match '(?m)^\s*legacy\s*$') {
     $script:ProviderArgs = @('-provider', 'default', '-provider', 'legacy')
     $script:LegacyAvailable = $true
 }
@@ -369,6 +371,7 @@ if ($CipherScan -ne 'None') {
             Add-Line 'INFO' ("Проверяется шифров: {0} из {1}" -f $candidates.Count, $allCiphers.Count)
 
             $accepted = @()
+            $unknownLocally = 0
             $i = 0
             foreach ($cipher in $candidates) {
                 $i++
@@ -376,16 +379,29 @@ if ($CipherScan -ne 'None') {
                     -PercentComplete (100 * $i / [Math]::Max(1, $candidates.Count))
 
                 $r = Invoke-SClient -Arguments @('-brief', '-tls1_2', '-cipher', ($cipher + ':@SECLEVEL=0'))
+                $text = ($r.Output -join "`n")
                 $hs = Get-HandshakeInfo -Result $r
-                if ($hs.Protocol -eq 'TLSv1.2') { $accepted += $cipher }
+                if ($hs.Protocol -eq 'TLSv1.2') {
+                    $accepted += $cipher
+                } elseif ($text -match 'no cipher match|no ciphers available|unknown cipher') {
+                    # локальная сборка не знает такой шифр: это не отказ сервера
+                    $unknownLocally++
+                }
             }
             Write-Progress -Activity 'Перебор шифров TLS 1.2' -Completed
+
+            $tested = $candidates.Count - $unknownLocally
+            if ($unknownLocally -gt 0) {
+                Add-Line 'INFO' ("{0} шифр(ов) не распознаны локальной сборкой openssl — по ним вердикта нет" -f $unknownLocally)
+            }
 
             $weakAccepted = @($accepted | Where-Object { $_ -match $weakPattern })
             $noPfs = @($accepted | Where-Object { $_ -notmatch '^(TLS_)?(ECDHE|DHE)' })
 
             if ($CipherScan -eq 'Weak') {
-                if ($weakAccepted.Count -eq 0) {
+                if ($tested -eq 0) {
+                    Add-Line 'WARN' 'Нечего проверять: локальная сборка не знает ни одного слабого шифра TLS 1.2'
+                } elseif ($weakAccepted.Count -eq 0) {
                     Add-Line 'PASS' 'Слабые/legacy шифры TLS 1.2 не принимаются'
                 } else {
                     foreach ($c in $weakAccepted) {
@@ -409,7 +425,11 @@ if ($CipherScan -ne 'None') {
                     }
                 }
                 if ($accepted.Count -eq 0) {
-                    Add-Line 'FAIL' 'Ни один шифр TLS 1.2 не подтвердился'
+                    if ($tested -eq 0) {
+                        Add-Line 'WARN' 'Нечего проверять: локальная сборка не знает ни одного шифра TLS 1.2'
+                    } else {
+                        Add-Line 'FAIL' 'Ни один шифр TLS 1.2 не подтвердился'
+                    }
                 }
             }
         }
